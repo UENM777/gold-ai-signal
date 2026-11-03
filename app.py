@@ -471,11 +471,11 @@ class App:
         self.root.after(250, self.update_tick)
 
     # collect new closed bars while running (merged by train.py next time you retrain)
-    def log(self, f, p_up, p_vol, side, conf, tp, sl, regime=None):
+    def log(self, f, p_up, p_vol, side, conf, tp, sl, regime=None, strong=None):
         os.makedirs("data", exist_ok=True)
         path = paths(self.profile)["live_log"]
         row = f[["time", "open", "high", "low", "close", "tick_volume", "spread"]].iloc[0].to_dict()
-        row.update(p_up=p_up, p_vol=p_vol, signal=side, conf=conf, tp=tp, sl=sl,
+        row.update(p_up=p_up, p_vol=p_vol, signal=side, strong=strong, regime=regime, conf=conf, tp=tp, sl=sl,
                    logged_at=datetime.now(), profile=self.profile)
         if os.path.exists(path):                                   # header from an older app version -> start a new file
             with open(path, newline="") as fh:
