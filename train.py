@@ -186,7 +186,7 @@ def train_profile(profile):
     # finalize (refit on ALL data) and save for the app
     exp_dir.save_model(exp_dir.finalize_model(dir_model), P["dir_model"], verbose=False)
     exp_vol.save_model(exp_vol.finalize_model(vol_model), P["vol_model"], verbose=False)
-    json.dump(stats, open(P["stats"], "w"), indent=2)     # written last: models + stats always match
+    save_json(stats, P["stats"])     # written last: models + stats always match
     print("saved models ->", P["dir"])
 
     # one row per profile -> slide table "how predictable is each horizon?"

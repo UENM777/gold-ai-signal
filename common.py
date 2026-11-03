@@ -169,3 +169,41 @@ def tp_sl(price: float, atr_val: float, side: str, vol_regime: str, h: int):
     if side == "BUY":
         return price + tp_m * move, price - sl_m * move
     return price - tp_m * move, price + sl_m * move
+
+
+def save_json(obj, path):
+    """Write JSON safely: numpy values converted, and written to a temp file first so a crash never leaves half a file."""
+    import json
+    def fix(o):
+        if isinstance(o, dict):
+            return {str(k): fix(v) for k, v in o.items()}
+        if isinstance(o, (list, tuple)):
+            return [fix(v) for v in o]
+        if isinstance(o, np.bool_):
+            return bool(o)
+        if isinstance(o, np.integer):
+            return int(o)
+        if isinstance(o, np.floating):
+            return float(o)
+        return o
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(fix(obj), fh, indent=2)
+    os.replace(tmp, path)
+
+
+def load_json(path):
+    """Read stats.json; if an older version left it cut off, recover everything before the broken part."""
+    import json
+    if not os.path.exists(path):
+        return {"tp_rate": {}}
+    text = open(path).read()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        cut = text.rfind('"last_retrain"')
+        if cut > 0:
+            fixed = json.loads(text[:cut].rstrip().rstrip(",") + "\n}")
+            save_json(fixed, path)
+            return fixed
+        raise

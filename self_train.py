@@ -35,11 +35,11 @@ def retrain(df, dir_model, vol_model, stats, profile, extras=None):
         new = clone(old).fit(fit[feats], fit[target])
         auc_old = roc_auc_score(val[target], old.predict_proba(val[feats])[:, 1])
         auc_new = roc_auc_score(val[target], new.predict_proba(val[feats])[:, 1])
-        swap = auc_new >= auc_old
+        swap = bool(auc_new >= auc_old)
         if swap:                                   # accepted -> refit on everything incl. validation
             new = clone(old).fit(data[feats], data[target])
         out[key] = new if swap else old
-        report.update({f"{key}_auc_old": round(auc_old, 4), f"{key}_auc_new": round(auc_new, 4), f"{key}_swap": swap})
+        report.update({f"{key}_auc_old": round(float(auc_old), 4), f"{key}_auc_new": round(float(auc_new), 4), f"{key}_swap": swap})
 
     new_stats = dict(stats)
     if report["dir_swap"]:                         # signal thresholds follow the new direction model
@@ -63,7 +63,7 @@ def save(dir_model, vol_model, stats, report):
             olds = sorted(f for f in os.listdir(f"{P['dir']}/backup") if f.startswith(os.path.basename(path) + "_"))
             for f in olds[:-KEEP_BACKUPS]:
                 os.remove(f"{P['dir']}/backup/{f}")
-    json.dump(stats, open(P["stats"], "w"), indent=2)
+    save_json(stats, P["stats"])
     hist = f"{P['dir']}/retrain_history.csv"
     new = not os.path.exists(hist)
     with open(hist, "a") as fh:

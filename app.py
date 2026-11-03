@@ -207,7 +207,7 @@ class App:
             if not trained(self.profile):
                 return None
             P = paths(self.profile)
-            stats = json.load(open(P["stats"])) if os.path.exists(P["stats"]) else {"tp_rate": {}}
+            stats = load_json(P["stats"])
             dm, vm = load_model(P["dir_model"], verbose=False), load_model(P["vol_model"], verbose=False)
             feats = [c for c in getattr(dm, "feature_names_in_", []) if c not in ("y_dir", "y_vol")]  # trust the model file
             if feats and feats != model_features(stats):
@@ -327,7 +327,12 @@ class App:
                             self.show_train_status()
         except Exception as e:
             self.lbl_foot.config(text=f"error: {e}", fg=RED)
-        self.check_retrain()
+        try:
+            self.check_retrain()
+        except Exception as e:
+            self.training = False
+            self.btn_train.config(state="normal", text="⟳  Retrain now")
+            self.lbl_train.config(text=f"self-train failed: {e}", fg=RED)
         self.root.after(1000 if REPLAY else PREDICT_EVERY_MS, self.update_bar)
 
     def compute(self, bars):
