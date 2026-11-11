@@ -1,4 +1,4 @@
-# Gold AI Signal — DES423 Section 1 · GIVE ME A!!
+# AUI — DES423 Section 1 · GIVE ME A!!
 
 ## Setup (Windows, Python 3.11) — once per computer
 ```
@@ -57,6 +57,23 @@ If a line like `[vol] calibrating ...` sits for more than 15 minutes, it's stuck
 
 Click or press Esc to skip the intro. Only restart the app when just `app.py` / `self_train.py` changed — no retraining needed.
 
+## Hugging Face ready-made models (optional)
+| Model | Hugging Face id | Input | What it shows in the app |
+|---|---|---|---|
+| Chronos-Bolt (Amazon) | `amazon/chronos-bolt-small` | past gold closes (numbers) | forecast price after the chosen horizon, 10–90% range, P(up) |
+| FinBERT | `ProsusAI/finbert` | latest gold / USD / Fed headlines (text, Google News RSS) | news mood Positive / Neutral / Negative — click it to read the headlines |
+| YOLOv8 chart patterns | `foduucom/stockmarket-pattern-detection-yolov8` | picture of the last 100 candles (image) | Double Top/Bottom, Head & Shoulders, Triangle, Trend line — click to see the boxes |
+
+Numbers + text + image = multimodal.
+
+```
+pip install -r requirements-hf.txt            # once (~1-2 GB: torch + transformers)
+python app.py                                  # first run downloads the models (~650 MB), then works offline
+python hf_eval.py "15 min" "1 hour" "1 day"    # ready-made Chronos vs our trained PyCaret model, same test period
+```
+`hf_eval.py` writes `figures/hf_comparison.csv` (accuracy + AUC of Chronos, PyCaret, and their average) — slide: "ready-made vs trained".
+Without these packages the app still works; the Hugging Face panel just shows how to install them.
+
 ## Horizons (dropdown "Predict next")
 | Profile | Reads | Predicts |
 |---|---|---|
@@ -78,6 +95,17 @@ Each profile has its own models in `models/<profile>/` and figures in `figures/<
 - Before/after for the slides: `python train.py "1 hour" --no-extras --fast` then `python train.py "1 hour" --fast`
   -> both rows in `figures/summary.csv` (column `extras_used`)
 
+## Traffic light: "Should I trade now?"
+Next to BUY/SELL the app shows 🟢 GO / 🟡 CAUTION / 🔴 NO TRADE. Click it to see why.
+- Every backtest trade on unseen data is tagged with its situation: volatility (model B), with/against trend
+  (SMA20 vs SMA50), market session (Asia / London / New York / London+NY / Off-hours) and RSI zone (<30 / 30-70 / >70)
+- **GO** = situations like this made money in the backtest · **NO TRADE** = they lost money ·
+  **CAUTION** = fewer than 30 past trades, so no verdict
+- RSI extreme that lost money for that side → one step down. Chronos pointing the other way → one step down (live only)
+- Honest check: rules are learned on the 1st half of the test period and checked on the 2nd half
+  → `figures/<horizon>/traffic_light_check.csv`. All situations ranked → `figures/<horizon>/situations.csv`
+- Needs a retrain once: `python train.py "1 hour" --fast` (older models fall back to STRONG / WEAK)
+
 ## Signals
 - Always BUY or SELL (the side P(up) leans to)
 - **STRONG** when P(up) is in the top/bottom 10% **and** at least 52% / at most 48%; otherwise **WEAK · risky**
@@ -89,6 +117,30 @@ Each profile has its own models in `models/<profile>/` and figures in `figures/<
 - Works on DEMO accounts only (`ALLOW_REAL_ACCOUNT = False` in `app.py`)
 - Turn on **Algo Trading** in the MT5 toolbar first
 - Orders are tagged with magic number 423001 and comment "GIVE ME A!! AI"
+
+## Statistics panel
+Click the **›** arrow on the right edge of the window: a panel slides out (click **‹** to close).
+- **Closed trades (last 90 days, from MT5 history):** Win / Loss / Total / Win % / Profit-Loss for AUTO, App buttons,
+  trades opened by hand in MT5, and all XAUUSD
+- **Was the app right? (current horizon):** every prediction logged while the app ran live is compared with what the
+  price really did after the horizon — Right / Wrong / Total / Right % for direction (all, per traffic light, STRONG) and volatility
+- Refreshes on every new bar while open, or press ⟳. % = count × 100 ÷ total
+
+## AUTO mode
+- Tick **AUTO** (top bar): the app opens trades by itself on each new bar, no confirmation popup. DEMO only
+- Trades only when the traffic light is GO, lot = Lot box, TP/SL automatic
+- Limits (edit in `common.py`): `AUTO_MAX_OPEN` 1 position, `AUTO_MAX_TRADES_24H` 10, and it switches itself off
+  when XAUUSD P/L over the last 24 h is below -`AUTO_MAX_LOSS_PCT_24H` % of balance (counts manual trades too)
+- **SHORT 1m** tick (next to AUTO): switches to the 1-min horizon and scalps, limit `AUTO_SHORT_MAX_TRADES_24H` (60)
+  trades per 24 h. Its trades get their own table in the statistics panel (all / BUY / SELL)
+- **Ignore light** tick: AUTO trades every new bar in the direction the model leans, even on NO TRADE (Demo testing)
+- Every AUTO order is logged in `data/auto_trades.csv`. Positions close by TP/SL (or the Close buttons)
+- Switching horizon keeps AUTO on; closing the app stops it (open positions keep their TP/SL in MT5)
+
+## Closing positions
+- The row under the AI panel shows open XAUUSD positions and their total P/L (updates every second)
+- **Close profit** closes only winning positions, **Close loss** only losing ones, **Close all** everything on XAUUSD
+- Always asks for confirmation; DEMO accounts only. Closes every XAUUSD position, including ones opened by hand in MT5
 
 ## Self-training
 - Retrains the selected profile every 60 new bars, or press **Retrain now**

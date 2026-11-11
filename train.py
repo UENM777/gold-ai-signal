@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Gold AI Signal — DES423 Section 1 · Group GIVE ME A!!
+# # AUI — DES423 Section 1 · Group GIVE ME A!!
 # Model A (direction): will XAUUSD be higher after the chosen horizon?   -> BUY / SELL + probability
 # Model B (volatility): will it move more than usual over that horizon?  -> sets TP/SL distance
 # Backtest: how often does TP get hit before SL on unseen data?          -> "hit %" shown in the app
@@ -25,7 +25,13 @@ from common import *
 POINT = 0.01   # XAUUSD point size on most brokers (spread column is in points)
 NO_EXTRAS = "--no-extras" in sys.argv   # train without related markets (for a before/after comparison)
 FAST = "--fast" in sys.argv          # fewer folds/tuning rounds, skip the 2 weakest+slowest models
-MODELS = ["lr", "nb", "rf", "et", "ada", "lightgbm", "xgboost"] + ([] if FAST else ["knn", "dt"])
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier
+# Random Forest / Extra Trees with PyCaret defaults grow every tree to full depth: on 100k bars the saved file
+# reached 1-2 GB (slow to load, lots of RAM) and memorises noise. min_samples_leaf keeps them small and less overfit.
+# LightGBM is left out: it crashes on this Windows setup ("access violation") and PyCaret silently skipped it anyway.
+TREE_KW = dict(n_estimators=200, min_samples_leaf=50, max_features="sqrt", random_state=42)
+MODELS = (["lr", "nb", RandomForestClassifier(**TREE_KW), ExtraTreesClassifier(**TREE_KW), "ada", "xgboost"]
+          + ([] if FAST else ["knn", "dt"]))
 FOLDS, N_ITER = (3, 8) if FAST else (5, 20)
 JOBS = next((int(a.split("=")[1]) for a in sys.argv if a.startswith("--jobs=")), -1)   # CPU cores per run (-1 = all)
 RESUME = "--resume" in sys.argv       # skip profiles that already have saved models
@@ -117,8 +123,39 @@ def backtest(t, p_up, p_vol, q_lo, q_hi, h, strong_only=True):
             if hit_tp:
                 outcome, exit_p = "TP", tp; break
         pnl = (exit_p - entry) if side == "BUY" else (entry - exit_p - sp[i])
-        rows.append(dict(time=t.time.values[i], side=side, regime=regime, conf=conf, outcome=outcome, pnl=pnl))
-    return pd.DataFrame(rows, columns=["time", "side", "regime", "conf", "outcome", "pnl"])
+        sit = situation(side, regime, t.rsi_14.values[i], t.sma20_sma50.values[i],
+                        t.sess_asia.values[i], t.sess_london.values[i], t.sess_ny.values[i])
+        rows.append(dict(time=t.time.values[i], side=side, regime=regime, conf=conf, outcome=outcome, pnl=pnl,
+                         strong=strong, align=sit["align"], session=sit["session"], rsi_zone=sit["rsi_zone"]))
+    return pd.DataFrame(rows, columns=["time", "side", "regime", "conf", "outcome", "pnl",
+                                       "strong", "align", "session", "rsi_zone"])
+
+
+def trade_filter(bt_all, fig_dir, profile):
+    """Traffic light: learn which situations made/lost money on the FIRST half of the test period,
+    then check on the SECOND half whether following it would have helped. The app uses a table from the whole period."""
+    if len(bt_all) < 4 * FILTER_MIN_N:
+        print("trade filter: not enough trades"); return build_filter(bt_all), {}
+    half = len(bt_all) // 2
+    first, second = bt_all.iloc[:half], bt_all.iloc[half:].copy()
+    f1 = build_filter(first)
+    second["light"] = [LIGHTS[traffic_light(dict(r), f1)[0]] for r in second.to_dict("records")]
+    rows = [dict(light="ALL (no filter)", n=len(second), avg_pnl=second.pnl.mean(), tp_rate=(second.outcome == "TP").mean(),
+                 total_pnl=second.pnl.sum())]
+    for lt in ["GO", "CAUTION", "NO TRADE"]:
+        g = second[second.light == lt]
+        rows.append(dict(light=lt, n=len(g), avg_pnl=g.pnl.mean() if len(g) else float("nan"),
+                         tp_rate=(g.outcome == "TP").mean() if len(g) else float("nan"), total_pnl=g.pnl.sum()))
+    check = pd.DataFrame(rows)
+    print(f"\nTRAFFIC LIGHT ({profile}) - rules from 1st half of test, checked on 2nd half:")
+    print(check.to_string(index=False))
+    check.to_csv(f"{fig_dir}/traffic_light_check.csv", index=False)
+    full = build_filter(bt_all)
+    pd.DataFrame([dict(situation=k, **v) for k, v in full["cells"].items()]).sort_values("avg_pnl", ascending=False) \
+        .to_csv(f"{fig_dir}/situations.csv", index=False)
+    go, all_ = check.iloc[1], check.iloc[0]
+    return full, dict(go_n=int(go.n), go_avg_pnl=float(go.avg_pnl) if go.n else None,
+                      all_avg_pnl=float(all_.avg_pnl), helped=bool(go.n >= FILTER_MIN_N and go.avg_pnl > all_.avg_pnl and go.avg_pnl > 0))   # must beat average AND make money
 
 
 def train_profile(profile):
@@ -181,6 +218,7 @@ def train_profile(profile):
         stats["tp_rate"][f"{s}_{r}"] = float((g.outcome == "TP").mean())
     for (s, r), g in bt_all.groupby(["side", "regime"]):
         stats["tp_rate_all"][f"{s}_{r}"] = float((g.outcome == "TP").mean())
+    stats["filter"], stats["filter_check"] = trade_filter(bt_all, P["figures"], profile)
     print(json.dumps(stats, indent=2))
 
     # finalize (refit on ALL data) and save for the app

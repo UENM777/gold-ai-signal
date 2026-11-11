@@ -29,6 +29,13 @@ TP_SL = {"HIGH": (2.0, 1.0), "LOW": (1.5, 1.0)}
 PREDICT_EVERY_MS = 2000    # live: check for a new closed bar every 2 s
 USE_FORMING_BAR = False    # True = predict on the unfinished bar (fast but features are distorted)
 DEFAULT_LOT = 0.01
+# AUTO mode (app checkbox): opens trades by itself, no confirmation popup. DEMO accounts only.
+AUTO_ONLY_GO = True            # trade only when the traffic light is GO (False = also on CAUTION)
+AUTO_MAX_OPEN = 1              # max positions opened by AUTO at the same time
+AUTO_MAX_TRADES_24H = 10       # max new AUTO trades per 24 hours
+AUTO_SHORT_PROFILE = "1 min"   # "SHORT" tick: AUTO scalps on this horizon
+AUTO_SHORT_MAX_TRADES_24H = 60 # trade limit while SHORT is ticked (instead of AUTO_MAX_TRADES_24H)
+AUTO_MAX_LOSS_PCT_24H = 3.0    # AUTO switches itself off when XAUUSD P/L of the last 24 h <= -3% of balance
 MAGIC = 423001             # tags orders placed by this app (DES423)
 
 # Related markets pulled from MT5 alongside gold (skipped automatically if the broker doesn't have one)
@@ -44,7 +51,11 @@ OLD_FEATURES = [           # features of models trained before related markets w
     "body_pct", "upper_wick", "lower_wick", "hour", "dow",
 ]
 SESSION_FEATURES = ["sess_asia", "sess_london", "sess_ny"]
-FEATURES = OLD_FEATURES + SESSION_FEATURES          # base set; extras are appended per model
+# Volatility context (added after experiment.py showed +0.015-0.025 AUC for the volatility model on short horizons)
+VOL_FEATURES = ["typical", "range_vs_typical", "range_4h_vs_typical", "std_60", "std_240", "vol_trend",
+                "atr_ratio", "recent_bar_range"]
+FEATURES = OLD_FEATURES + SESSION_FEATURES + VOL_FEATURES   # base set; extras are appended per model
+LIVE_BARS = 1500           # bars the app loads per prediction (the 500-bar "typical range" needs history)
 
 
 def extra_features(symbols):
@@ -132,6 +143,16 @@ def make_features(df: pd.DataFrame, h: int, extras: dict = None) -> pd.DataFrame
     df["sess_asia"] = ((utc_h >= 0) & (utc_h < 8)).astype(int)    # Tokyo / Sydney / Shanghai
     df["sess_london"] = ((utc_h >= 7) & (utc_h < 16)).astype(int)
     df["sess_ny"] = ((utc_h >= 12) & (utc_h < 21)).astype(int)    # overlap with London = most active
+    # volatility context: the volatility label asks "bigger than the typical range?" -> tell the model what typical is
+    r = c.pct_change()
+    df["typical"] = df["past_range_h"].rolling(500, min_periods=100).median()
+    df["range_vs_typical"] = df["past_range_h"] / df["typical"]
+    df["range_4h_vs_typical"] = (df["high"].rolling(4 * h).max() - df["low"].rolling(4 * h).min()) / c / df["typical"]
+    df["std_60"], df["std_240"] = r.rolling(60).std(), r.rolling(240).std()
+    df["vol_trend"] = df["std_20"] / df["std_240"]
+    df["atr_ratio"] = df["atr"] / atr(df, 100)
+    df["recent_bar_range"] = df["range_pct"].rolling(5).mean() / df["range_pct"].rolling(500, min_periods=100).mean()
+    df[VOL_FEATURES] = df[VOL_FEATURES].replace([np.inf, -np.inf], np.nan)
     for s, ex in (extras or {}).items():
         ex = ex[["time", "close"]].rename(columns={"close": f"{s}_close"}).sort_values("time")
         df = pd.merge_asof(df, ex, on="time", direction="backward")   # last known price at or before this bar
@@ -207,3 +228,84 @@ def load_json(path):
             save_json(fixed, path)
             return fixed
         raise
+
+
+# ---------------- "Should I trade now?" traffic light ----------------
+# Built from the backtest on unseen data: which SITUATIONS made or lost money, not from gut feeling.
+FILTER_MIN_N = 30          # a situation needs at least this many past trades before we trust its result
+LIGHTS = {2: "GO", 1: "CAUTION", 0: "NO TRADE"}
+
+
+def session_name(asia, london, ny):
+    if london and ny:
+        return "London+NY"
+    if ny:
+        return "New York"
+    if london:
+        return "London"
+    if asia:
+        return "Asia"
+    return "Off-hours"
+
+
+def situation(side, regime, rsi_v, trend_v, asia, london, ny):
+    """Describe the market situation of one signal with a few simple, explainable tags."""
+    trend_up = trend_v > 0                                         # SMA20 above SMA50
+    align = "with trend" if (side == "BUY") == trend_up else "against trend"
+    rsi_zone = "RSI high" if rsi_v > 70 else "RSI low" if rsi_v < 30 else "RSI mid"
+    return dict(regime=regime, align=align, session=session_name(asia, london, ny), rsi_zone=rsi_zone, side=side)
+
+
+def cell_key(s):
+    return f"{s['regime']}|{s['align']}|{s['session']}"
+
+
+def rsi_key(s):
+    return f"{s['side']}|{s['rsi_zone']}"
+
+
+def build_filter(trades):
+    """trades: DataFrame with regime, align, session, rsi_zone, side, pnl. Returns the lookup table."""
+    def table(keys):
+        out = {}
+        for k, g in trades.groupby(keys):
+            k = k if isinstance(k, tuple) else (k,)
+            out["|".join(map(str, k))] = dict(n=int(len(g)), avg_pnl=float(g.pnl.mean()),
+                                              tp_rate=float((g.outcome == "TP").mean()))
+        return out
+    return dict(cells=table(["regime", "align", "session"]), rsi=table(["side", "rsi_zone"]), min_n=FILTER_MIN_N)
+
+
+def traffic_light(s, filt, chronos_agrees=None, check=None):
+    """Returns (level 0/1/2, [reasons]). Uses the backtest table; Chronos agreement is a live-only extra check.
+    check: stats["filter_check"]. If the out-of-sample check says GO trades did NOT beat average trades on this
+    horizon, GO is capped to CAUTION (the light has no proven value there)."""
+    reasons, mn = [], filt.get("min_n", FILTER_MIN_N)
+    c = filt["cells"].get(cell_key(s))
+    where = f"{s['regime'].lower()} volatility, {s['align']}, {s['session']}"
+    if not c or c["n"] < mn:
+        level = 1
+        reasons.append(f"? {where}: too few past trades ({c['n'] if c else 0}) to judge")
+    elif c["avg_pnl"] > 0:
+        level = 2
+        reasons.append(f"✔ {where}: made money in backtest ({c['n']} trades, avg {c['avg_pnl']:+.2f} $/oz, TP {c['tp_rate']:.0%})")
+    else:
+        level = 0
+        reasons.append(f"✘ {where}: lost money in backtest ({c['n']} trades, avg {c['avg_pnl']:+.2f} $/oz, TP {c['tp_rate']:.0%})")
+    r = filt["rsi"].get(rsi_key(s))
+    if s["rsi_zone"] != "RSI mid" and r and r["n"] >= mn:
+        if r["avg_pnl"] < 0:
+            level = max(0, level - 1)
+            reasons.append(f"✘ {s['side']} with {s['rsi_zone']}: lost in backtest ({r['n']} trades, avg {r['avg_pnl']:+.2f})")
+        else:
+            reasons.append(f"✔ {s['side']} with {s['rsi_zone']}: ok in backtest ({r['n']} trades, avg {r['avg_pnl']:+.2f})")
+    if check is not None and not check.get("helped", False) and level == 2:
+        level = 1
+        reasons.append("⚠ GO capped to CAUTION: on this horizon, GO trades did not beat average trades "
+                       "in the out-of-sample check")
+    if chronos_agrees is False:
+        level = max(0, level - 1)
+        reasons.append("✘ Chronos (Hugging Face) points the other way  [live check, not backtested]")
+    elif chronos_agrees is True:
+        reasons.append("✔ Chronos (Hugging Face) agrees  [live check, not backtested]")
+    return level, reasons

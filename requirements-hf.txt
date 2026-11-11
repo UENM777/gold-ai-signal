@@ -1,0 +1,12 @@
+# Optional: Hugging Face ready-made models (Chronos-Bolt + FinBERT + YOLOv8 chart patterns).
+# Install AFTER requirements.txt:   pip install -r requirements-hf.txt
+# On Windows, plain "torch" from PyPI is the CPU version (no graphics card needed).
+numpy==1.26.4                 # keep PyCaret's numpy (newer OpenCV would force numpy 2 and break PyCaret)
+torch>=2.2,<3
+torchvision
+transformers>=4.41,<5
+accelerate>=1.1,<2
+chronos-forecasting==2.3.2
+ultralytics>=8.1
+opencv-python==4.11.0.86      # last version that works with numpy 1.26
+huggingface_hub
