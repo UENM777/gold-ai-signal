@@ -31,11 +31,11 @@ USE_FORMING_BAR = False    # True = predict on the unfinished bar (fast but feat
 DEFAULT_LOT = 0.01
 # AUTO mode (app checkbox): opens trades by itself, no confirmation popup. DEMO accounts only.
 AUTO_ONLY_GO = True            # trade only when the traffic light is GO (False = also on CAUTION)
-AUTO_MAX_OPEN = 1              # max positions opened by AUTO at the same time
-AUTO_MAX_TRADES_24H = 10       # max new AUTO trades per 24 hours
+AUTO_MAX_OPEN = 10              # max positions opened by AUTO at the same time
+AUTO_MAX_TRADES_24H = 1000       # max new AUTO trades per 24 hours
 AUTO_SHORT_PROFILE = "1 min"   # "SHORT" tick: AUTO scalps on this horizon
-AUTO_SHORT_MAX_TRADES_24H = 60 # trade limit while SHORT is ticked (instead of AUTO_MAX_TRADES_24H)
-AUTO_MAX_LOSS_PCT_24H = 3.0    # AUTO switches itself off when XAUUSD P/L of the last 24 h <= -3% of balance
+AUTO_SHORT_MAX_TRADES_24H = 1000 # trade limit while SHORT is ticked (instead of AUTO_MAX_TRADES_24H)
+AUTO_MAX_LOSS_PCT_24H = 10.0    # AUTO switches itself off when XAUUSD P/L of the last 24 h <= -3% of balance
 MAGIC = 423001             # tags orders placed by this app (DES423)
 
 # Related markets pulled from MT5 alongside gold (skipped automatically if the broker doesn't have one)

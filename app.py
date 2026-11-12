@@ -125,7 +125,9 @@ class MT5Feed:
         ins = [d for d in deals if d.entry == mt5.DEAL_ENTRY_IN and d.magic == MAGIC and "AUTO" in (d.comment or "")]
         n = (sum(1 for d in ins if "SHORT" not in d.comment), sum(1 for d in ins if "SHORT" in d.comment))
         pnl = sum(d.profit + d.swap + d.commission for d in deals) + sum(p.profit + p.swap for p in pos)
-        return sum(1 for p in pos if p.magic == MAGIC), n, pnl, mt5.account_info().balance
+        mine = [p for p in pos if p.magic == MAGIC and "AUTO" in (p.comment or "")]
+        n_open = (sum(1 for p in mine if "SHORT" not in p.comment), sum(1 for p in mine if "SHORT" in p.comment))
+        return n_open, n, pnl, mt5.account_info().balance          # open counted per mode: SHORT and normal AUTO
 
     def close_positions(self, which):
         """which: 'profit' | 'loss' | 'all'. Closes this symbol's open positions at market. Returns a report string."""
@@ -418,6 +420,8 @@ class App:
         self.btn_arrow = tk.Button(r, text="›", command=self.toggle_stats, bg=PANEL, fg=GOLD, activebackground="#374151",
                                    activeforeground=GOLD, relief="flat", font=("Segoe UI", 14, "bold"), cursor="hand2")
         self.btn_arrow.place(x=WIN_W - 18, y=WIN_H // 2 - 34, width=18, height=68)
+
+        self.lbl_auto.lift()                                  # status sits over the left panel (was hidden behind it)
 
         self.set_profile(self.profile)
         self.update_bar()
@@ -774,11 +778,12 @@ class App:
         if not self.var_auto.get() or not self.signal:
             return
         try:
-            n_open, (n_auto, n_short), pnl, bal = self.feed.auto_stats()
+            (open_auto, open_short), (n_auto, n_short), pnl, bal = self.feed.auto_stats()
         except Exception as e:
             self.lbl_auto.config(text=f"error: {e}", fg=RED); return
         short, nolight = self.var_short.get(), self.var_nolight.get()
         n_tr, max_tr = (n_short, AUTO_SHORT_MAX_TRADES_24H) if short else (n_auto, AUTO_MAX_TRADES_24H)
+        n_open = open_short if short else open_auto            # SHORT and normal AUTO don't block each other
         tail = f"{'SHORT ' if short else ''}{n_tr}/{max_tr} · 24h {pnl:+.2f}"
         if pnl <= -bal * AUTO_MAX_LOSS_PCT_24H / 100:
             self.var_auto.set(False)
@@ -788,7 +793,8 @@ class App:
                 "position open" if n_open >= AUTO_MAX_OPEN else
                 "max trades" if n_tr >= max_tr else None)
         if skip:
-            self.lbl_auto.config(text=f"on · skip ({skip}) · {tail}", fg=GOLD); return
+            hint = " · resets as old trades pass 24 h" if skip == "max trades" else ""
+            self.lbl_auto.config(text=f"on · skip ({skip}) · {tail}{hint}", fg=RED if skip == "max trades" else GOLD); return
         try:
             lot = round(float(self.var_lot.get()), 2)
         except ValueError:
