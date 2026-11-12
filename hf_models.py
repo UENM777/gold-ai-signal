@@ -8,6 +8,7 @@ simply hides these panels.  Install with:  pip install -r requirements-hf.txt
 The first use downloads the models (~200 MB + ~440 MB) into the Hugging Face cache; after that it runs offline.
 """
 import re
+import threading
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -33,14 +34,20 @@ NEWS_MAX_AGE_H = 24
 NEWS_MAX_ITEMS = 40
 
 
+# Loading two models at the same moment from different threads breaks one of them
+# ("Tensor.item() cannot be called on meta tensors"): transformers/accelerate load weights through a global
+# "empty weights" switch. So every model is loaded under one lock.
+_load_lock = threading.Lock()
+
 # ---------------- Chronos ----------------
 _chronos = None
 
 
 def chronos():
     global _chronos
-    if _chronos is None:
-        _chronos = BaseChronosPipeline.from_pretrained(CHRONOS_ID, device_map="cpu", torch_dtype=torch.float32)
+    with _load_lock:
+        if _chronos is None:
+            _chronos = BaseChronosPipeline.from_pretrained(CHRONOS_ID, device_map="cpu", torch_dtype=torch.float32)
     return _chronos
 
 
@@ -75,8 +82,9 @@ _finbert = None
 
 def finbert():
     global _finbert
-    if _finbert is None:
-        _finbert = hf_pipeline("text-classification", model=FINBERT_ID, top_k=None, device=-1)
+    with _load_lock:
+        if _finbert is None:
+            _finbert = hf_pipeline("text-classification", model=FINBERT_ID, top_k=None, device=-1)
     return _finbert
 
 
@@ -163,9 +171,10 @@ _yolo = None
 
 def yolo():
     global _yolo
-    if _yolo is None:
-        weights = next(f for f in list_repo_files(YOLO_ID) if f.endswith(".pt"))
-        _yolo = YOLO(hf_hub_download(YOLO_ID, weights))
+    with _load_lock:
+        if _yolo is None:
+            weights = next(f for f in list_repo_files(YOLO_ID) if f.endswith(".pt"))
+            _yolo = YOLO(hf_hub_download(YOLO_ID, weights))
     return _yolo
 
 

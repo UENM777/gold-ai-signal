@@ -111,6 +111,10 @@ class MT5Feed:
                 p["side"] = "BUY" if d.type == mt5.DEAL_TYPE_BUY else "SELL"
                 p["time"] = d.time                                   # server time (epoch seconds)
                 p["regime"] = "HIGH" if cm.endswith(" H") else "LOW" if cm.endswith(" L") else ""
+                by_slug = {slug(k): k for k in PROFILES}
+                p["profile"] = (AUTO_SHORT_PROFILE if "SHORT" in cm else
+                                next((by_slug[t] for t in cm.split() if t in by_slug), ""))
+                p["ticket"] = d.position_id
             else:
                 p["closed"] = True
         return [p for p in pos.values() if p["closed"]]
@@ -652,8 +656,14 @@ class App:
         # --- trades ---
         try:
             trades = self.feed.trade_history()
-            rows = [trade_row(name, [p for p in trades if p["kind"] in kinds]) for name, kinds in
-                    [("AUTO", ("auto",)), ("App buttons", ("app",)), ("By hand in MT5", ("manual",)),
+            auto = [p for p in trades if p["kind"] == "auto"]
+            self.fill_auto_profile(auto)
+            rows = [trade_row(f"AUTO · {pr}", [p for p in auto if p["profile"] == pr])
+                    for pr in PROFILES if any(p["profile"] == pr for p in auto)]
+            if any(not p["profile"] for p in auto):
+                rows.append(trade_row("AUTO · horizon ?", [p for p in auto if not p["profile"]]))
+            rows = (rows or [trade_row("AUTO", [])]) + [trade_row(name, [p for p in trades if p["kind"] in kinds]) for name, kinds in
+                    [("App buttons", ("app",)), ("By hand in MT5", ("manual",)),
                      ("All XAUUSD", ("auto", "short", "app", "manual"))]]
             y = table(f"Closed trades · last 90 days ({self.feed.currency})",
                       ["", "Win", "Loss", "Total", "Win %", "Profit/Loss"], rows, y, [112, 44, 44, 48, 56, 78])
@@ -690,6 +700,26 @@ class App:
         except Exception as e:
             y = self.stats_note(f"Predictions: {e}", y)
         self.stats_note("% = count × 100 ÷ total · small totals are mostly luck, judge after 100+", WIN_H - 26, 20)
+
+    def fill_auto_profile(self, trades):
+        """AUTO trades opened before the horizon was written into the order comment: find it in data/auto_trades*.csv
+        (the log keeps the ticket; in MT5 a position's id is the ticket of the order that opened it)."""
+        todo = [p for p in trades if not p.get("profile")]
+        if not todo:
+            return
+        import glob, re
+        lut = {}
+        for fpath in glob.glob("data/auto_trades*.csv"):
+            try:
+                with open(fpath, newline="") as fh:
+                    for row in csv.DictReader(fh):
+                        m = re.search(r"ticket #(\d+)", row.get("message") or "")
+                        if m and row.get("profile"):
+                            lut[int(m.group(1))] = row["profile"]
+            except OSError:
+                continue
+        for p in todo:
+            p["profile"] = lut.get(p.get("ticket"), "")
 
     def fill_regime(self, trades, prof):
         """Older AUTO trades have no H/L tag: look up the volatility the app showed for the bar they opened on."""
@@ -801,7 +831,7 @@ class App:
             self.lbl_auto.config(text="bad lot value", fg=RED); return
         s = self.signal
         ok, msg = self.feed.place(s["side"], lot, s["regime"], s["atr"], PROFILES[self.profile]["h"],
-                                  comment="GIVE ME A!! AUTO" + (" SHORT" if short else "") + (" NL" if nolight else "")
+                                  comment="GIVE ME A!! AUTO" + (" SHORT" if short else " " + slug(self.profile)) + (" NL" if nolight else "")
                                   + (" H" if s["regime"] == "HIGH" else " L"))       # volatility at entry, for the stats
         self.lbl_auto.config(text=f"{'opened ' + s['side'] if ok else 'order failed'} · {tail}", fg=GREEN if ok else RED)
         os.makedirs("data", exist_ok=True)
