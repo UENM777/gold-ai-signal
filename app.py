@@ -109,6 +109,8 @@ class MT5Feed:
                 cm = d.comment or ""
                 p["kind"] = ("short" if "SHORT" in cm else "auto" if "AUTO" in cm else "app") if d.magic == MAGIC else "manual"
                 p["side"] = "BUY" if d.type == mt5.DEAL_TYPE_BUY else "SELL"
+                p["time"] = d.time                                   # server time (epoch seconds)
+                p["regime"] = "HIGH" if cm.endswith(" H") else "LOW" if cm.endswith(" L") else ""
             else:
                 p["closed"] = True
         return [p for p in pos.values() if p["closed"]]
@@ -653,8 +655,14 @@ class App:
                       ["", "Win", "Loss", "Total", "Win %", "Profit/Loss"], rows, y, [112, 44, 44, 48, 56, 78])
             # --- SHORT (1 min scalping) ---
             sh = [p for p in trades if p["kind"] == "short"]
+            self.fill_regime(sh, AUTO_SHORT_PROFILE)
             rows = [trade_row("SHORT · all", sh), trade_row("SHORT · BUY", [p for p in sh if p["side"] == "BUY"]),
-                    trade_row("SHORT · SELL", [p for p in sh if p["side"] == "SELL"])]
+                    trade_row("SHORT · SELL", [p for p in sh if p["side"] == "SELL"]),
+                    trade_row("SHORT · HIGH vol", [p for p in sh if p["regime"] == "HIGH"]),
+                    trade_row("SHORT · LOW vol", [p for p in sh if p["regime"] == "LOW"])]
+            unknown = sum(1 for p in sh if not p["regime"])
+            if unknown:
+                rows.append(trade_row("SHORT · vol unknown", [p for p in sh if not p["regime"]]))
             y = table("Short mode · AUTO 1 min", ["", "Win", "Loss", "Total", "Win %", "Profit/Loss"], rows, y + 4,
                       [112, 44, 44, 48, 56, 78])
             try:
@@ -678,6 +686,31 @@ class App:
         except Exception as e:
             y = self.stats_note(f"Predictions: {e}", y)
         self.stats_note("% = count × 100 ÷ total · small totals are mostly luck, judge after 100+", WIN_H - 26, 20)
+
+    def fill_regime(self, trades, prof):
+        """Older AUTO trades have no H/L tag: look up the volatility the app showed for the bar they opened on."""
+        todo = [p for p in trades if not p.get("regime") and p.get("time")]
+        if not todo:
+            return
+        path = paths(prof)["live_log"]
+        if not os.path.exists(path):
+            return
+        log = pd.read_csv(path, on_bad_lines="skip")
+        if "time" not in log or "p_vol" not in log:
+            return
+        reg = log["regime"] if "regime" in log else None
+        lut = {}
+        for i, t in enumerate(pd.to_datetime(log["time"], errors="coerce")):
+            if pd.isna(t):
+                continue
+            r = reg.iloc[i] if reg is not None and isinstance(reg.iloc[i], str) else None
+            lut[int(t.timestamp())] = r or ("HIGH" if float(log["p_vol"].iloc[i]) >= .5 else "LOW")
+        step = TF_SECONDS[PROFILES[prof]["tf"]]
+        for p in todo:
+            bar = (p["time"] // step) * step - step            # trade opens just after this bar closed
+            for b in (bar, bar - step, bar + step):
+                if b in lut:
+                    p["regime"] = lut[b]; break
 
     def stats_note(self, text, y, h=34):
         tk.Label(self.stats_frame, text=text, fg=DIM, bg="#0f172a", font=("Segoe UI", 8), anchor="nw", justify="left",
@@ -762,17 +795,26 @@ class App:
             self.lbl_auto.config(text="bad lot value", fg=RED); return
         s = self.signal
         ok, msg = self.feed.place(s["side"], lot, s["regime"], s["atr"], PROFILES[self.profile]["h"],
-                                  comment="GIVE ME A!! AUTO" + (" SHORT" if short else "") + (" NL" if nolight else ""))
+                                  comment="GIVE ME A!! AUTO" + (" SHORT" if short else "") + (" NL" if nolight else "")
+                                  + (" H" if s["regime"] == "HIGH" else " L"))       # volatility at entry, for the stats
         self.lbl_auto.config(text=f"{'opened ' + s['side'] if ok else 'order failed'} · {tail}", fg=GREEN if ok else RED)
         os.makedirs("data", exist_ok=True)
         path, head = "data/auto_trades.csv", ["time", "profile", "side", "lot", "p_up", "regime", "light", "short",
                                               "ignore_light", "ok", "message"]
         if os.path.exists(path):
             with open(path, newline="") as fh:
-                if next(csv.reader(fh), []) != head:            # older column layout -> keep it aside
+                old_head = next(csv.reader(fh), [])
+            if old_head != head:                                 # older column layout -> keep it aside (file closed first:
+                try:                                             #  Windows can't rename an open file)
                     os.replace(path, path.replace(".csv", f"_old_{datetime.now():%Y%m%d%H%M%S}.csv"))
+                except OSError:                                  # e.g. open in Excel -> write to a side file instead
+                    path = path.replace(".csv", "_v2.csv")
         new = not os.path.exists(path)
-        with open(path, "a", newline="") as fh:
+        try:
+            fh = open(path, "a", newline="")
+        except OSError as e:                                     # file locked (e.g. open in Excel): skip the log, keep trading
+            self.lbl_auto.config(text=f"{self.lbl_auto.cget('text')} · log skipped ({e.__class__.__name__})"); return
+        with fh:
             w = csv.writer(fh)
             if new:
                 w.writerow(head)
